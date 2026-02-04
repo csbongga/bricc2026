@@ -1,0 +1,266 @@
+var LINE_CHANNEL_TOKEN = PropertiesService.getScriptProperties().getProperty('linetoken');
+var GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('geminikey');
+
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents);
+
+    if (!payload.events || payload.events.length === 0) {
+      return ContentService.createTextOutput('OK');
+    }
+
+    payload.events.forEach((eventData) => {
+      const replyToken = eventData.replyToken;
+      if (!replyToken || replyToken === "00000000000000000000000000000000") return;
+
+      // 1. เรียก Loading Animation (ใส่ userId ให้ถูกต้อง)
+      // if (eventData.source && eventData.source.userId) {
+      //   showLoading(eventData.source.userId);
+      // }
+
+      const message = eventData.message;
+      if (!message) return;
+
+      // --- จุดที่ต้องแก้: ประกาศตัวแปร messageType ---
+      const messageType = message.type; 
+      // ------------------------------------------
+
+      if (messageType === 'text') {
+        const text = (message.text || '').trim();
+        const blocked = ["เกี่ยวกับเรา", "คำถามที่พบบ่อย", "วิธีใช้", "ผู้จัดทำ","คลีนิคใกล้ฉัน"];
+        if (blocked.includes(text)) return;
+
+      if (eventData.source && eventData.source.userId) {
+        showLoading(eventData.source.userId);
+      }
+
+        const replyMessage = callTextGenerativeLanguageAPI(text);
+        replyToLine(replyToken, replyMessage);
+
+      } else if (messageType === 'image') {
+        const messageId = message.id;
+          if (eventData.source && eventData.source.userId) {
+            showLoading(eventData.source.userId);
+          }
+        const replyMessage = callImageGenerativeLanguageAPI(messageId);
+        replyToLine(replyToken, replyMessage);
+
+      } else if (messageType === 'file') {
+        replyToLine(replyToken, 'ขออภัยไม่รองรับไฟล์ประเภทนี้ รองรับเฉพาะข้อความและรูปภาพเท่านั้น');
+
+      } else {
+        replyToLine(replyToken, 'ประเภทข้อความไม่ถูกต้อง');
+      }
+    });
+
+    return ContentService.createTextOutput('OK');
+
+  } catch (err) {
+    // พิมพ์ Error ลง Log เพื่อเช็คว่าพลาดตรงไหน
+    console.error("doPost error: " + err);
+    return ContentService.createTextOutput('ERROR');
+  }
+}
+
+function replyToLine(replyToken, message) {
+  const url = 'https://api.line.me/v2/bot/message/reply';
+
+  // กันข้อความยาวเกิน (กันไว้ก่อน)
+  const safeMessage = String(message || '').slice(0, 4500);
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + LINE_CHANNEL_TOKEN,
+  };
+
+  const data = {
+    replyToken: replyToken,
+    messages: [{ type: 'text', text: safeMessage }],
+  };
+
+  const options = {
+    method: 'post',
+    headers: headers,
+    payload: JSON.stringify(data),
+    muteHttpExceptions: true,
+  };
+
+  const resp = UrlFetchApp.fetch(url, options);
+  const code = resp.getResponseCode();
+  if (code < 200 || code >= 300) {
+    console.error(`LINE reply error ${code}: ${resp.getContentText()}`);
+  }
+}
+
+function callTextGenerativeLanguageAPI(userText) {
+  const apiUrl =
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
+    + GEMINI_API_KEY;
+
+  const instruction =
+    "ตอนนี้นายทำหน้าที่เป็น AI ที่เชี่ยวชาญด้านผิวหนัง\n" +
+    "ตอบเป็นภาษาไทยด้วยคำที่เข้าใจง่าย ไม่เป็นศัพท์ทางการแพทย์มากเกินไปลงท้ายด้วยครับ และเหมาะกับ LINE\n" +
+    "ห้ามใช้สัญลักษณ์ Markdown หรือเครื่องหมาย * หรือหัวข้อแบบตัวหนา\n" +
+    "ขอเป็นประโยคที่ไม่ยาวจนขี้เกียจอ่าน\n" +
+    "ถ้ามีคนถามว่า ส่งรูปให้ดูได้มั้ยหรืออะไรประมาณนั้น ให้ตอบว่า ได้เลยครับ\n" +
+    "ทำหน้าที่แค่วิเคราะห์ว่าอาจจะเป็นอะไร และแนะนำว่าควรจะทำอะไร และบอกเสมอว่า นี่เป็นแค่การวิเคราะห์อาการเบื้องต้นเท่านั้น หากไม่ดีขึ้นควรพบแพทย์ทันที\n" +
+    "ตอบเฉพาะคำถามที่เกี่ยวกับโรคผิวหนังเท่านั้น\n" +
+    "ถ้าไม่เกี่ยวกับโรคผิวหนัง ให้ตอบว่า: ขอโทษด้วยเราตอบเฉพาะคำถามที่เกี่ยวกับโรคผิวหนังเท่านั้น\n" +
+    "ให้คำแนะนำเบื้องต้นทั่วไป ไม่แทนการวินิจฉัย แนะนำพบแพทย์เมื่อมีอาการรุนแรงหรือกังวล\n";
+
+
+
+
+  const requestData = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: `${instruction}\nคำถาม: ${userText}` }]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.4,
+      topK: 1,
+      topP: 1,
+      maxOutputTokens: 2048,
+      stopSequences: []
+    }
+  };
+
+  const requestOptions = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(requestData),
+    muteHttpExceptions: true,
+  };
+
+  const response = UrlFetchApp.fetch(apiUrl, requestOptions);
+  const code = response.getResponseCode();
+  const body = response.getContentText();
+
+  if (code === 200) {
+    const data = JSON.parse(body);
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    return text || 'ไม่พบข้อมูล';
+  }
+
+  console.error(`Gemini text error ${code}: ${body}`);
+  return `เกิดข้อผิดพลาดในการเรียกใช้ API: ${code}`;
+}
+
+function callImageGenerativeLanguageAPI(messageId) {
+  const url = `https://api-data.line.me/v2/bot/message/${messageId}/content`;
+  const options = {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + LINE_CHANNEL_TOKEN },
+    muteHttpExceptions: true,
+  };
+
+  try {
+    const getcontent = UrlFetchApp.fetch(url, options);
+    const code = getcontent.getResponseCode();
+    if (code !== 200) {
+      console.error(`LINE image fetch error ${code}: ${getcontent.getContentText()}`);
+      return `ดึงรูปจาก LINE ไม่สำเร็จ: ${code}`;
+    }
+
+    const blob = getcontent.getBlob();
+    const mimeType = blob.getContentType() || 'image/jpeg';
+    const base64EncodedImage = Utilities.base64Encode(blob.getBytes());
+
+    const apiUrl =
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
+      + GEMINI_API_KEY;
+
+    const prompt =
+      "คุณคือ AI ผู้เชี่ยวชาญด้านผิวหนัง ประเมินความเป็นไปได้ของภาวะผิวหนังที่อาจพบ ให้คำแนะนำในการดูแลตัวเอง และย้ำเสมอว่านี่ไม่ใช่การวินิจฉัยทางการแพทย์ ตอบเป็นภาษาไทย อ่านง่าย เหมาะกับ LINE\n" +
+    "ห้ามใช้สัญลักษณ์ Markdown หรือเครื่องหมาย * หรือหัวข้อแบบตัวหนา\n" +
+      "เป็นคำแนะนำทั่วไป ไม่ใช่การวินิจฉัย\n";
+
+    // const prompt =
+    //   "คุณคือแพทย์ผู้เชี่ยวชาญด้านโรคผิวหนัง\n" +
+    //   "ช่วยวิเคราะห์ภาพผิวหนังที่แนบมา\n" +
+    //   "1 ระบุว่าเป็นผิวหนังส่วนใดของร่างกาย (ถ้าบอกไม่ได้ให้บอกว่าไม่ชัดเจน)\n" +
+    //   "2 อธิบายลักษณะผิว (สี ผื่น แดง บวม ตุ่ม ตกสะเก็ด ฯลฯ)\n" +
+    //   "3 ประเมินความเป็นไปได้ของภาวะผิวหนังที่อาจพบ (เป็นไปได้หลายข้อ)\n" +
+    //   "4 แนะนำการดูแลเบื้องต้นที่ปลอดภัย\n" +
+    //   "5 ระบุสัญญาณอันตรายที่ควรพบแพทย์ทันที\n" +
+    //   "ตอบเป็นภาษาไทย อ่านง่าย เหมาะกับ LINE\n" +
+    //   "ห้ามใช้ Markdown หรือเครื่องหมาย *\n" +
+    //   "เป็นคำแนะนำทั่วไป ไม่ใช่การวินิจฉัย\n";
+
+    const requestData = {
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: prompt },
+            {
+              inline_data: {
+                mime_type: mimeType,
+                data: base64EncodedImage
+              }
+            }
+          ]
+        }
+      ],
+      // generationConfig: {
+      //   temperature: 0.4,
+      //   topK: 40,
+      //   topP: 0.95,
+      //   maxOutputTokens: 2048
+      // }
+      generationConfig: {
+        temperature: 0.4,
+        topK: 1,
+        topP: 1,
+        maxOutputTokens: 2048,
+        stopSequences: []
+      }
+    };
+
+    const reqOptions = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(requestData),
+      muteHttpExceptions: true,
+    };
+
+    const resp = UrlFetchApp.fetch(apiUrl, reqOptions);
+    const rcode = resp.getResponseCode();
+    const rbody = resp.getContentText();
+
+    if (rcode === 200) {
+      const data = JSON.parse(rbody);
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      return text || 'ไม่พบข้อมูล';
+    }
+
+    console.error(`Gemini image error ${rcode}: ${rbody}`);
+    return `เกิดข้อผิดพลาดในการเรียกใช้ API: ${rcode}`;
+
+  } catch (error) {
+    console.error(`callImageGenerativeLanguageAPI error: ${error}`);
+    return `เกิดข้อผิดพลาดในการเรียกใช้ API: ${error}`;
+  }
+}
+
+
+function showLoading(userId) {
+  const url = 'https://api.line.me/v2/bot/chat/loading/start';
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + LINE_CHANNEL_TOKEN,
+  };
+  const data = {
+    'chatId': userId,
+    'loadingSeconds': 20 // แสดง animation นานสูงสุด 20 วินาที (จะหายไปเองเมื่อเราส่งข้อความตอบกลับ)
+  };
+  const options = {
+    'method': 'post',
+    'headers': headers,
+    'payload': JSON.stringify(data),
+    'muteHttpExceptions': true
+  };
+  UrlFetchApp.fetch(url, options);
+}

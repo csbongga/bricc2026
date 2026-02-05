@@ -1,0 +1,448 @@
+var LINE_CHANNEL_TOKEN = PropertiesService.getScriptProperties().getProperty('linetoken');
+var GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('geminikey');
+
+// =====================
+// WEBHOOK
+// =====================
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents);
+
+    if (!payload.events || payload.events.length === 0) {
+      return ContentService.createTextOutput('OK');
+    }
+
+    payload.events.forEach((eventData) => {
+      const replyToken = eventData.replyToken;
+      if (!replyToken || replyToken === "00000000000000000000000000000000") return;
+
+      const message = eventData.message;
+      if (!message) return;
+
+      const messageType = message.type;
+
+      // กันเมนูที่ไม่ต้องให้ AI ตอบ
+      const blocked = ["เกี่ยวกับเรา", "คำถามที่พบบ่อย", "วิธีใช้", "ผู้จัดทำ", "คลีนิคใกล้ฉัน"];
+
+      // เรียก loading
+      if (eventData.source && eventData.source.userId) {
+        showLoading(eventData.source.userId);
+      }
+
+      if (messageType === 'text') {
+        const text = (message.text || '').trim();
+        if (!text) return;
+        if (blocked.includes(text)) return;
+
+        const result = callTextGenerativeLanguageAPI_FLEX(text);
+
+        if (result.ok) {
+          replyToLineFlex(replyToken, result.altText, result.flexContents);
+        } else {
+          replyToLine(replyToken, result.error || 'ขออภัย ระบบขัดข้องชั่วคราวครับ');
+        }
+
+      } else if (messageType === 'image') {
+        const messageId = message.id;
+        const result = callImageGenerativeLanguageAPI_FLEX(messageId);
+
+        if (result.ok) {
+          replyToLineFlex(replyToken, result.altText, result.flexContents);
+        } else {
+          replyToLine(replyToken, result.error || 'ขออภัย ระบบขัดข้องชั่วคราวครับ');
+        }
+
+      } else if (messageType === 'file') {
+        replyToLine(replyToken, 'ขออภัยไม่รองรับไฟล์ประเภทนี้ รองรับเฉพาะข้อความและรูปภาพเท่านั้นครับ');
+
+      } else {
+        replyToLine(replyToken, 'ประเภทข้อความไม่ถูกต้องครับ');
+      }
+    });
+
+    return ContentService.createTextOutput('OK');
+
+  } catch (err) {
+    console.error("doPost error: " + err);
+    return ContentService.createTextOutput('ERROR');
+  }
+}
+
+// =====================
+// LINE REPLY: TEXT
+// =====================
+function replyToLine(replyToken, message) {
+  const url = 'https://api.line.me/v2/bot/message/reply';
+
+  const safeMessage = String(message || '').slice(0, 4500);
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + LINE_CHANNEL_TOKEN,
+  };
+
+  const data = {
+    replyToken: replyToken,
+    messages: [{ type: 'text', text: safeMessage }],
+  };
+
+  const options = {
+    method: 'post',
+    headers: headers,
+    payload: JSON.stringify(data),
+    muteHttpExceptions: true,
+  };
+
+  const resp = UrlFetchApp.fetch(url, options);
+  const code = resp.getResponseCode();
+  if (code < 200 || code >= 300) {
+    console.error(`LINE reply error ${code}: ${resp.getContentText()}`);
+  }
+}
+
+// =====================
+// LINE REPLY: FLEX
+// =====================
+function replyToLineFlex(replyToken, flexAltText, flexContents) {
+  const url = 'https://api.line.me/v2/bot/message/reply';
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + LINE_CHANNEL_TOKEN,
+  };
+
+  const data = {
+    replyToken: replyToken,
+    messages: [{
+      type: 'flex',
+      altText: String(flexAltText || 'คำแนะนำเบื้องต้น'),
+      contents: flexContents
+    }],
+  };
+
+  const options = {
+    method: 'post',
+    headers: headers,
+    payload: JSON.stringify(data),
+    muteHttpExceptions: true,
+  };
+
+  const resp = UrlFetchApp.fetch(url, options);
+  const code = resp.getResponseCode();
+  if (code < 200 || code >= 300) {
+    console.error(`LINE flex reply error ${code}: ${resp.getContentText()}`);
+  }
+}
+
+// =====================
+// GEMINI -> FLEX (TEXT)
+// =====================
+function callTextGenerativeLanguageAPI_FLEX(userText) {
+  const apiUrl =
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
+    + GEMINI_API_KEY;
+
+  const instruction =
+    "คุณเป็น AI ผู้ช่วยด้านผิวหนัง ตอบเป็นภาษาไทย คำอ่านง่าย เหมาะกับ LINE\n" +
+    "สำคัญ: ตอบกลับเป็น JSON เพียวๆ เท่านั้น (ห้ามมีข้อความอื่นนอก JSON)\n" +
+    "JSON ต้องเป็น Flex Message contents ของ LINE แบบ bubble\n" +
+    "ห้ามใช้ Markdown หรือเครื่องหมาย *\n" +
+    "ให้แบ่งหัวข้อ: สรุป, เป็นไปได้ว่า, แนะนำทำ, สัญญาณอันตราย, หมายเหตุ\n" +
+    "ข้อความต้องไม่ยาวเกินไป อ่านง่าย และลงท้ายด้วยครับ\n" +
+    "ย้ำเสมอว่าเป็นการวิเคราะห์เบื้องต้น ไม่ใช่การวินิจฉัย และถ้าไม่ดีขึ้นควรพบแพทย์\n" +
+    "ตอบเฉพาะคำถามโรคผิวหนังเท่านั้น ถ้าไม่เกี่ยวข้อง ให้ส่ง bubble ที่มีข้อความ: ขอโทษด้วยเราตอบเฉพาะคำถามที่เกี่ยวกับด้านผิวหนังเท่านั้นครับ\n" +
+    "ยึดโครงตัวอย่างนี้ (แก้เฉพาะข้อความใน text ได้):\n" +
+    getFlexTemplateExampleJSON();
+
+  const requestData = {
+    contents: [{
+      role: "user",
+      parts: [{ text: `${instruction}\nคำถาม: ${userText}` }]
+    }],
+    generationConfig: {
+      temperature: 0.4,
+      topK: 1,
+      topP: 1,
+      maxOutputTokens: 1400
+    }
+  };
+
+  const requestOptions = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(requestData),
+    muteHttpExceptions: true,
+  };
+
+  const response = UrlFetchApp.fetch(apiUrl, requestOptions);
+  const code = response.getResponseCode();
+  const body = response.getContentText();
+
+  if (code !== 200) {
+    console.error(`Gemini text error ${code}: ${body}`);
+    return { ok: false, error: `เกิดข้อผิดพลาดในการเรียกใช้ API: ${code}` };
+  }
+
+  const data = JSON.parse(body);
+  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+  const parsed = safeParseFlexJSON(raw);
+  if (!parsed.ok) {
+    return { ok: false, error: "แปลงผลลัพธ์เป็น Flex ไม่สำเร็จครับ" };
+  }
+
+  return {
+    ok: true,
+    altText: "คำแนะนำผิวหนังเบื้องต้น",
+    flexContents: normalizeFlexBubble(parsed.value)
+  };
+}
+
+// =====================
+// GEMINI -> FLEX (IMAGE)
+// =====================
+function callImageGenerativeLanguageAPI_FLEX(messageId) {
+  const lineContentUrl = `https://api-data.line.me/v2/bot/message/${messageId}/content`;
+  const lineOptions = {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + LINE_CHANNEL_TOKEN },
+    muteHttpExceptions: true,
+  };
+
+  try {
+    const getcontent = UrlFetchApp.fetch(lineContentUrl, lineOptions);
+    const code = getcontent.getResponseCode();
+    if (code !== 200) {
+      console.error(`LINE image fetch error ${code}: ${getcontent.getContentText()}`);
+      return { ok: false, error: `ดึงรูปจาก LINE ไม่สำเร็จ: ${code}` };
+    }
+
+    const blob = getcontent.getBlob();
+    const mimeType = blob.getContentType() || 'image/jpeg';
+    const base64EncodedImage = Utilities.base64Encode(blob.getBytes());
+
+    const apiUrl =
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='
+      + GEMINI_API_KEY;
+
+    const prompt =
+      "คุณเป็น AI ผู้ช่วยด้านผิวหนัง วิเคราะห์จากภาพแบบระมัดระวัง ตอบเป็นภาษาไทย อ่านง่าย เหมาะกับ LINE\n" +
+      "สำคัญ: ตอบกลับเป็น JSON เพียวๆ เท่านั้น (ห้ามมีข้อความอื่นนอก JSON)\n" +
+      "JSON ต้องเป็น Flex Message contents ของ LINE แบบ bubble\n" +
+      "ห้ามใช้ Markdown หรือเครื่องหมาย *\n" +
+      "ให้แบ่งหัวข้อ: สรุป, เป็นไปได้ว่า, แนะนำทำ, สัญญาณอันตราย, หมายเหตุ\n" +
+      "ต้องย้ำว่าเป็นการวิเคราะห์เบื้องต้น ไม่ใช่การวินิจฉัย และถ้าไม่ดีขึ้นควรพบแพทย์\n" +
+      "ยึดโครงตัวอย่างนี้ (แก้เฉพาะข้อความใน text ได้):\n" +
+      getFlexTemplateExampleJSON();
+
+    const requestData = {
+      contents: [{
+        role: "user",
+        parts: [
+          { text: prompt },
+          {
+            inline_data: {
+              mime_type: mimeType,
+              data: base64EncodedImage
+            }
+          }
+        ]
+      }],
+      generationConfig: {
+        temperature: 0.4,
+        topK: 1,
+        topP: 1,
+        maxOutputTokens: 1400
+      }
+    };
+
+    const reqOptions = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(requestData),
+      muteHttpExceptions: true,
+    };
+
+    const resp = UrlFetchApp.fetch(apiUrl, reqOptions);
+    const rcode = resp.getResponseCode();
+    const rbody = resp.getContentText();
+
+    if (rcode !== 200) {
+      console.error(`Gemini image error ${rcode}: ${rbody}`);
+      return { ok: false, error: `เกิดข้อผิดพลาดในการเรียกใช้ API: ${rcode}` };
+    }
+
+    const data = JSON.parse(rbody);
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+    const parsed = safeParseFlexJSON(raw);
+    if (!parsed.ok) {
+      return { ok: false, error: "แปลงผลลัพธ์เป็น Flex ไม่สำเร็จครับ" };
+    }
+
+    return {
+      ok: true,
+      altText: "ผลประเมินจากภาพผิวหนัง",
+      flexContents: normalizeFlexBubble(parsed.value)
+    };
+
+  } catch (error) {
+    console.error(`callImageGenerativeLanguageAPI_FLEX error: ${error}`);
+    return { ok: false, error: `เกิดข้อผิดพลาด: ${error}` };
+  }
+}
+
+// =====================
+// FLEX TEMPLATE (ตัวอย่างโครง)
+// =====================
+function getFlexTemplateExampleJSON() {
+  // ส่งเป็น string ให้โมเดลเลียนแบบ (อย่าใส่ Markdown)
+  return JSON.stringify({
+    type: "bubble",
+    size: "mega",
+    body: {
+      type: "box",
+      layout: "vertical",
+      spacing: "md",
+      "contents": [
+  { "type": "text", "text": "สรุป", "weight": "bold", "size": "lg", "color": "#111111", "wrap": true },
+  { "type": "text", "text": "พิมพ์สรุปสั้นๆ 1–2 บรรทัดครับ", "size": "sm", "color": "#333333", "wrap": true },
+
+  { "type": "separator", "margin": "md" },
+
+  { "type": "text", "text": "เป็นไปได้ว่า", "weight": "bold", "size": "md", "color": "#111111", "wrap": true, "margin": "md" },
+  { "type": "text", "text": "• ตัวอย่างข้อ 1\n• ตัวอย่างข้อ 2", "size": "sm", "color": "#333333", "wrap": true },
+
+  { "type": "text", "text": "แนะนำทำ", "weight": "bold", "size": "md", "color": "#111111", "wrap": true, "margin": "md" },
+  { "type": "text", "text": "• ตัวอย่างข้อ 1\n• ตัวอย่างข้อ 2", "size": "sm", "color": "#333333", "wrap": true },
+
+  { "type": "text", "text": "สัญญาณอันตราย", "weight": "bold", "size": "md", "color": "#B3261E", "wrap": true, "margin": "md" },
+  { "type": "text", "text": "• ถ้าเจ็บมาก/บวมมาก/มีไข้\n• ถ้าลามเร็ว หรือมีหนอง", "size": "sm", "color": "#333333", "wrap": true },
+
+  { "type": "separator", "margin": "md" },
+
+  {
+    "type": "box",
+    "layout": "vertical",
+    "paddingAll": "12px",
+    "backgroundColor": "#FFF7E6",
+    "cornerRadius": "12px",
+    "spacing": "xs",
+    "margin": "md",
+    "contents": [
+      { "type": "text", "text": "หมายเหตุ", "weight": "bold", "size": "sm", "color": "#8A4B00", "wrap": true },
+      { "type": "text", "text": "นี่เป็นการวิเคราะห์เบื้องต้น ไม่ใช่การวินิจฉัย หากไม่ดีขึ้นควรพบแพทย์ทันทีครับ", "size": "sm", "color": "#8A4B00", "wrap": true }
+    ]
+  }
+]
+
+    }
+  });
+}
+
+// =====================
+// PARSE & NORMALIZE
+// =====================
+function safeParseFlexJSON(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return { ok: false };
+
+  // 1) ตรงๆ ก่อน
+  try {
+    return { ok: true, value: JSON.parse(s) };
+  } catch (_) {}
+
+  // 2) ตัด ```json ... ``` หรือ ``` ... ```
+  const fenced = extractFencedJSON(s);
+  if (fenced) {
+    try {
+      return { ok: true, value: JSON.parse(fenced) };
+    } catch (_) {}
+  }
+
+  // 3) ดึงช่วง { ... } ก้อนแรกแบบสมดุลวงเล็บ
+  const objStr = extractFirstJSONObject(s);
+  if (objStr) {
+    try {
+      return { ok: true, value: JSON.parse(objStr) };
+    } catch (_) {}
+  }
+
+  return { ok: false };
+}
+
+function extractFencedJSON(text) {
+  const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (!m) return '';
+  return String(m[1] || '').trim();
+}
+
+// ดึง JSON object ก้อนแรกแบบนับปีกกา (กันโมเดลใส่คำอธิบายก่อน/หลัง)
+function extractFirstJSONObject(text) {
+  let start = -1;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{') {
+      if (start === -1) start = i;
+      depth++;
+    } else if (ch === '}') {
+      if (start !== -1) depth--;
+      if (start !== -1 && depth === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+  return '';
+}
+
+// บังคับให้เป็น bubble เสมอ (กันกรณีโมเดลส่งเป็น "contents" หรือส่งมาไม่ครบ)
+function normalizeFlexBubble(obj) {
+  // ถ้าโมเดลส่ง bubble มาแล้ว
+  if (obj && obj.type === 'bubble') return obj;
+
+  // ถ้าส่งเป็น { contents: bubble } หรือ { contents: [...] } (หลุดรูปแบบ)
+  if (obj && obj.contents && obj.contents.type === 'bubble') return obj.contents;
+
+  // ถ้าเป็น array ให้ห่อเป็น bubble ง่ายๆ
+  if (Array.isArray(obj)) {
+    return {
+      type: "bubble",
+      body: { type: "box", layout: "vertical", contents: obj }
+    };
+  }
+
+  // fallback bubble
+  return {
+    type: "bubble",
+    body: {
+      type: "box",
+      layout: "vertical",
+      contents: [
+        { type: "text", text: "ขออภัย ระบบจัดรูปแบบคำตอบไม่สำเร็จครับ", wrap: true }
+      ]
+    }
+  };
+}
+
+// =====================
+// LOADING ANIMATION
+// =====================
+function showLoading(userId) {
+  const url = 'https://api.line.me/v2/bot/chat/loading/start';
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + LINE_CHANNEL_TOKEN,
+  };
+  const data = {
+    chatId: userId,
+    loadingSeconds: 20
+  };
+  const options = {
+    method: 'post',
+    headers: headers,
+    payload: JSON.stringify(data),
+    muteHttpExceptions: true
+  };
+  UrlFetchApp.fetch(url, options);
+}
